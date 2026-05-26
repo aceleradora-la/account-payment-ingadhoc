@@ -17,10 +17,14 @@ class TestCashboxAllowedUsersViewPayments(TransactionCase):
         self.payment_model = self.env["account.payment"]
 
         # Usuario demo (de cashbox_demo.xml)
-        self.user_viewer = self.env.ref("account_cashbox.user_demo_invoicing")
+        self.user_viewer = self.env.ref("account_cashbox.user_demo_invoicing", raise_if_not_found=False)
+        if not self.user_viewer:
+            self.skipTest("Demo data not available (account_cashbox.user_demo_invoicing)")
 
         # Caja demo (de cashbox_demo.xml), le asignamos el usuario viewer en allowed_users_view_payments
-        self.cashbox = self.env.ref("account_cashbox.pop_config_caja_1")
+        self.cashbox = self.env.ref("account_cashbox.pop_config_caja_1", raise_if_not_found=False)
+        if not self.cashbox:
+            self.skipTest("Demo data not available (account_cashbox.pop_config_caja_1)")
         self.cashbox.allowed_users_view_payments = [(6, 0, [self.user_viewer.id])]
 
         # Buscar o crear una sesión para la caja demo
