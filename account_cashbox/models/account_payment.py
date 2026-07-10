@@ -20,6 +20,10 @@ class AccountPayment(models.Model):
         compute="_compute_requiere_account_cashbox_session",
         compute_sudo=False,
     )
+    available_cashbox_session_ids = fields.Many2many(
+        "account.cashbox.session",
+        compute="_compute_available_cashbox_session_ids",
+    )
 
     destination_cashbox_session_id = fields.Many2one(
         "account.cashbox.session",
@@ -47,22 +51,32 @@ class AccountPayment(models.Model):
         else:
             self.destination_cashbox_session_id = False
 
+    @api.depends("journal_id")
+    def _compute_company_id(self):
+        # journal_id puede pertenecer a la empresa padre (shared_to_branches=True) y el usuario
+        # de sucursal no tiene acceso de lectura a ese res.company (res_company_rule_employee).
+        # Usamos sudo() para evaluar la jerarquía sin disparar AccessError.
+        for payment in self:
+            if payment.journal_id.sudo().company_id not in payment.company_id.sudo().parent_ids:
+                payment.company_id = (payment.journal_id.sudo().company_id or self.env.company)._accessible_branches()[
+                    :1
+                ]
+
     @api.depends_context("uid")
     # dummy depends para que se compute(no estamos seguros porque solo con el depends_context no computa)
     @api.depends("partner_id")
     def _compute_requiere_account_cashbox_session(self):
         self.requiere_account_cashbox_session = self.env.user.requiere_account_cashbox_session
 
+    @api.depends("company_id")
+    def _compute_available_cashbox_session_ids(self):
+        Session = self.env["account.cashbox.session"]
+        for rec in self:
+            rec.available_cashbox_session_ids = Session.search(Session._get_available_domain(rec.company_id))
+
     def _compute_cashbox_session_id(self):
         for rec in self:
-            session_ids = self.env["account.cashbox.session"].search(
-                [
-                    ("state", "=", "opened"),
-                    "|",
-                    ("user_ids", "=", self.env.uid),
-                    ("user_ids", "=", False),
-                ]
-            )
+            session_ids = rec.available_cashbox_session_ids
             if len(session_ids) == 1:
                 rec.cashbox_session_id = session_ids.id
             elif len(session_ids) > 1:

@@ -1,3 +1,5 @@
+from collections import defaultdict
+
 from odoo import Command, _, api, fields, models
 from odoo.exceptions import ValidationError
 
@@ -192,7 +194,7 @@ class AccountPayment(models.Model):
                 journal_id = res.get("journal_id")
                 if journal_id:
                     journal = self.env["account.journal"].browse(journal_id)
-                    currency_id = (journal.currency_id or journal.company_id.currency_id).id
+                    currency_id = (journal.currency_id or journal.sudo().company_id.currency_id).id
             if currency_id:
                 res["previous_currency_id"] = currency_id
         return res
@@ -393,14 +395,14 @@ class AccountPayment(models.Model):
 
     @api.onchange("amount")
     def _onchange_amount_update_exact(self):
-        for rec in self:
+        for rec in self.filtered("currency_id"):
             if not rec.currency_id.is_zero(rec.amount - rec.amount_exact):
                 rec.amount_exact = rec.amount
 
     def _compute_amount(self):
         super()._compute_amount()
         for rec in self:
-            if not rec.currency_id.is_zero(rec.amount - rec.amount_exact):
+            if rec.currency_id and not rec.currency_id.is_zero(rec.amount - rec.amount_exact):
                 rec.amount_exact = rec.amount
 
     @api.onchange("currency_id")
@@ -416,7 +418,7 @@ class AccountPayment(models.Model):
                 old_currency = rec.company_currency_id
             # Actualizar para el próximo onchange antes de cualquier continue
             rec.previous_currency_id = new_currency
-            if rec.state != "draft" or not rec.amount:
+            if rec.state != "draft":
                 continue
 
             old_amount = rec.amount_exact or rec.amount
@@ -434,7 +436,7 @@ class AccountPayment(models.Model):
             if (
                 rec.env.context.get("default_amount")
                 and rec.currency_id == rec.company_currency_id
-                and rec.amount_exact == rec._origin.amount_exact
+                and rec.currency_id.is_zero(rec._origin.amount_exact)
                 and not rec.currency_id.is_zero(amount - rec.env.context.get("default_amount"))
             ):
                 amount = rec.env.context.get("default_amount")
@@ -757,10 +759,9 @@ class AccountPayment(models.Model):
                 balance_in_c = amount_for_calc
 
             if dest_currency == self.counterpart_currency_id and self.counterpart_currency_amount:
-                # counterpart_currency_id coincide con la moneda destino (caso habitual
-                # en transferencias internas). Usamos counterpart_currency_amount que
-                # respeta cualquier cotización cruzada editada por el usuario.
-                paired_amount = abs(self.counterpart_currency_amount)
+                # Sin redondear: el counterpart_currency_amount ya viene redondeado a la
+                # moneda destino y le quitaba precisión a amount_exact (drift 100.002).
+                paired_amount = abs(amount_for_calc * self.counterpart_rate)
             elif dest_currency == self.company_currency_id:
                 paired_amount = balance_in_c
             else:
@@ -771,7 +772,7 @@ class AccountPayment(models.Model):
                     self.company_id,
                     self.date or fields.Date.context_today(self),
                 )
-                paired_amount = dest_currency.round(balance_in_c * dest_rate)
+                paired_amount = balance_in_c * dest_rate
 
             vals["amount_exact"] = paired_amount
             vals["amount"] = paired_amount
@@ -847,11 +848,11 @@ class AccountPayment(models.Model):
                 debit_moves = debit_moves.filtered(lambda x: x.move_id not in exchange_move_ids)
                 credit_moves = credit_moves.filtered(lambda x: x.move_id not in exchange_move_ids)
 
-            debit_lines_sorted = debit_moves.filtered(lambda x: x.date_maturity != False).sorted(
-                key=lambda x: (x.date_maturity, x.move_id.name)
+            debit_lines_sorted = debit_moves.filtered(lambda x: x.date_maturity).sorted(
+                key=lambda x: (x.date_maturity, x.move_id.name or "")
             )
-            credit_lines_sorted = credit_moves.filtered(lambda x: x.date_maturity != False).sorted(
-                key=lambda x: (x.date_maturity, x.move_id.name)
+            credit_lines_sorted = credit_moves.filtered(lambda x: x.date_maturity).sorted(
+                key=lambda x: (x.date_maturity, x.move_id.name or "")
             )
             debit_lines_without_date_maturity = debit_moves - debit_lines_sorted
             credit_lines_without_date_maturity = credit_moves - credit_lines_sorted
@@ -1136,7 +1137,15 @@ class AccountPayment(models.Model):
                 )
 
     def _reconcile_after_post(self):
-        for rec in self.filtered(lambda x: x.company_id.use_payment_pro and not x.is_internal_transfer):
+        to_reconcile = self.filtered(lambda x: x.company_id.use_payment_pro and not x.is_internal_transfer)
+        # El pago con tarjeta de crédito llega a 'paid' con el asiento en borrador (el core no lo
+        # postea) y _reconcile_after_post exige posteados. Posteamos ese asiento antes de conciliar.
+        to_reconcile.filtered(
+            lambda p: p.state == "paid" and p.outstanding_account_id.account_type == "liability_credit_card"
+        ).move_id.filtered(
+            lambda m: m.state == "draft" and m.company_currency_id.is_zero(sum(m.line_ids.mapped("balance")))
+        ).action_post()
+        for rec in to_reconcile:
             counterpart_aml = rec.mapped("move_id.line_ids").filtered(
                 lambda r: not r.reconciled and r.account_id.account_type in self._get_valid_payment_account_types()
             )
@@ -1233,3 +1242,28 @@ class AccountPayment(models.Model):
         for rec in self.filtered(lambda x: x.move_id and x.move_id.state not in ["draft", "cancel"]):
             if rec.journal_id != rec.move_id.journal_id:
                 raise ValidationError(_("The payment journal must match the journal of its journal entry."))
+
+    # ── Report helpers ────────────────────────────────────────────────────────
+
+    def _get_receipt_header_address(self):
+        """Return the partner address shown in the receipt header.
+        Override in country/receiptbook modules to customize."""
+        self.ensure_one()
+        return self.company_id.partner_id
+
+    def _get_payment_bundle_key(self):
+        """Key used to group payments into bundles for printing.
+        Base: each payment is its own bundle (key = id)."""
+        return self.id
+
+    def _get_payment_bundles(self):
+        """Return a dict {key: account.payment recordset} grouping self into print bundles."""
+        bundles = defaultdict(lambda: self.env["account.payment"])
+        for rec in self:
+            bundles[rec._get_payment_bundle_key()] += rec
+        return bundles
+
+    def _select_bundle(self, bundles):
+        """Return the bundle recordset for this payment from the bundles dict."""
+        self.ensure_one()
+        return bundles.get(self._get_payment_bundle_key())
