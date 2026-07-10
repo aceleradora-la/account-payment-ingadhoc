@@ -190,7 +190,7 @@ class AccountPayment(models.Model):
             payments = rec.main_payment_id.link_payment_ids
             total_linked_in_b = sum(payments.mapped("payment_total"))
             rec.payment_difference = (
-                abs(rec.main_payment_id.selected_debt)
+                abs(rec.main_payment_id.to_pay_amount)
                 - total_linked_in_b
                 - rec.main_payment_id.withholdings_amount
                 - rec.main_payment_id.write_off_amount
@@ -212,6 +212,18 @@ class AccountPayment(models.Model):
                     }
 
             rec.warnings = warnings
+
+    def _get_bundle_payment_total(self, payment_bundle):
+        # main_payment.payment_total already accumulates all link_payment_ids via
+        # _compute_payment_total; summing the full bundle would double-count the links.
+        if self.is_main_payment:
+            return self.payment_total
+        return super()._get_bundle_payment_total(payment_bundle)
+
+    def _get_bundle_imputed_total(self, payment_bundle):
+        if self.is_main_payment:
+            return self.matched_amount + self.unmatched_amount
+        return super()._get_bundle_imputed_total(payment_bundle)
 
     def _get_payment_bundles(self):
         main_payments = self.filtered("is_main_payment")
@@ -261,10 +273,15 @@ class AccountPayment(models.Model):
         if draft_linked:
             draft_linked.action_post()
 
+        # Envío diferido del recibo del main: acá los vinculados ya imputaron, así el
+        # PDF sale con los comprobantes y no "A cuenta" (receiptbook lo saltea en el post).
+        self.filtered("is_main_payment")._send_receiptbook_mail()
+
         return res
 
     def action_draft(self):
-        res = super(AccountPayment, self + self.link_payment_ids).action_draft()
+        active_links = self.link_payment_ids.filtered(lambda p: p.state != "cancel")
+        res = super(AccountPayment, self + active_links).action_draft()
         if self.main_payment_id:
             return {
                 "type": "ir.actions.act_window",
@@ -371,9 +388,18 @@ class AccountPayment(models.Model):
         self.ensure_one()
         if self.is_main_payment:
             move_ids = self.move_id | self.link_payment_ids.mapped("move_id")
-            return move_ids._get_records_action(
-                name=_("Journal Entry"),
-            )
+            if len(move_ids) == 1:
+                return move_ids._get_records_action(name=_("Journal Entry"))
+            list_view = self.env.ref("l10n_ar_payment_bundle.view_account_move_bundle_list")
+            return {
+                "name": _("Journal Entry"),
+                "type": "ir.actions.act_window",
+                "res_model": "account.move",
+                "view_mode": "list,form",
+                "domain": [("id", "in", move_ids.ids)],
+                "views": [(list_view.id, "list"), (False, "form")],
+                "context": {"create": False},
+            }
         return super().button_open_journal_entry()
 
     @api.depends()

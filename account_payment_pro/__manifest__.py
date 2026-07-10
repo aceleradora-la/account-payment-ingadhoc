@@ -2,7 +2,7 @@
 # License AGPL-3.0 or later (http://www.gnu.org/licenses/agpl).
 {
     "name": "Account Payment Super Power",
-    "version": "19.0.2.6.0",
+    "version": "19.0.2.9.0",
     "category": "Payment",
     "website": "www.adhoc.com.ar",
     "author": "ADHOC SA",
@@ -28,6 +28,7 @@
         "views/account_move.xml",
         "views/account_write_off_type_views.xml",
         "views/res_company_setting.xml",
+        "views/report_payment_receipt_template.xml",
     ],
     "demo": [],
     "post_init_hook": "_post_init_hooks",

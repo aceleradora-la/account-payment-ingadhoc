@@ -25,8 +25,9 @@ class AccountPayment(models.Model):
     def action_post(self):
         # si no tengo nombre y tengo talonario de recibo, numeramos con el talonario
         for rec in self.filtered(
-            lambda x: x.receiptbook_id
-            and (not x.name or x.name == "/" or (x.move_id and not x.move_id._get_last_sequence()))
+            lambda x: (
+                x.receiptbook_id and (not x.name or x.name == "/" or (x.move_id and not x.move_id._get_last_sequence()))
+            )
         ):
             if not rec.receiptbook_id.active:
                 raise ValidationError(
@@ -40,7 +41,8 @@ class AccountPayment(models.Model):
 
             if not rec.name or rec.name == "/":
                 name = rec.receiptbook_id.with_context(ir_sequence_date=rec.date).sequence_id.next_by_id()
-                rec.name = "%s %s" % (rec.receiptbook_id.document_type_id.doc_code_prefix, name)
+                prefix = rec.receiptbook_id.document_type_id.doc_code_prefix
+                rec.name = ("%s %s" % (prefix, name)) if prefix else (name or "/")
 
         res = super().action_post()
         # Reincorporamos el seteo del l10n_latam_document_type_id para el caso de usar talonario de recibo
@@ -50,9 +52,17 @@ class AccountPayment(models.Model):
         for rec in self.filtered(lambda x: x.receiptbook_id):
             rec.move_id.l10n_latam_document_type_id = rec.receiptbook_id.document_type_id.id
 
+        payments_to_send = self
+        # El bundle imputa sus pagos vinculados al final de su action_post, así que acá
+        # el recibo saldría "A cuenta". Diferimos el envío del main: lo dispara el bundle.
+        if "is_main_payment" in self._fields:
+            payments_to_send = payments_to_send.filtered(lambda x: not x.is_main_payment)
+        payments_to_send._send_receiptbook_mail()
+        return res
+
+    def _send_receiptbook_mail(self):
         for rec in self.filtered("receiptbook_id.mail_template_id"):
             rec.message_post_with_source(rec.receiptbook_id.mail_template_id, subtype_xmlid="mail.mt_comment")
-        return res
 
     @api.depends("company_id", "partner_type", "is_internal_transfer")
     def _compute_receiptbook(self):
@@ -77,7 +87,13 @@ class AccountPayment(models.Model):
         super(
             AccountPayment,
             self.filtered(
-                lambda x: (not x.move_id or x.move_id.state != "draft" or not x.receiptbook_id)
-                and not (x.receiptbook_id and x.payment_transaction_id)
+                lambda x: (
+                    (not x.move_id or x.move_id.state != "draft" or not x.receiptbook_id)
+                    and not (x.receiptbook_id and x.payment_transaction_id)
+                )
             ),
         )._compute_name()
+
+    def _get_receipt_header_address(self):
+        self.ensure_one()
+        return self.receiptbook_id.report_partner_id or super()._get_receipt_header_address()

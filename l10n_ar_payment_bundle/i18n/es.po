@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: Odoo Server 19.0+e\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-05-20 16:31+0000\n"
+"POT-Creation-Date: 2026-06-17 14:05+0000\n"
 "PO-Revision-Date: 2026-04-23 18:41+0000\n"
 "Last-Translator: julia elizondo <jue@adhoc.inc>\n"
 "Language-Team: Spanish <https://translation.dev-adhoc.com/projects/account-"
@@ -169,6 +169,11 @@ msgid "Journal"
 msgstr "Diario"
 
 #. module: l10n_ar_payment_bundle
+#: model_terms:ir.ui.view,arch_db:l10n_ar_payment_bundle.view_account_move_bundle_list
+msgid "Journal Entries"
+msgstr ""
+
+#. module: l10n_ar_payment_bundle
 #. odoo-python
 #: code:addons/l10n_ar_payment_bundle/models/account_payment.py:0
 msgid "Journal Entry"
@@ -226,6 +231,11 @@ msgid "New Name"
 msgstr "Nuevo Nombre"
 
 #. module: l10n_ar_payment_bundle
+#: model_terms:ir.ui.view,arch_db:l10n_ar_payment_bundle.view_account_move_bundle_list
+msgid "Number"
+msgstr ""
+
+#. module: l10n_ar_payment_bundle
 #. odoo-python
 #: code:addons/l10n_ar_payment_bundle/models/account_payment.py:0
 msgid "Paid Bills"
@@ -251,6 +261,11 @@ msgstr "Pago"
 #: model:ir.model,name:l10n_ar_payment_bundle.model_account_payment_method
 msgid "Payment Methods"
 msgstr "Métodos de Pago"
+
+#. module: l10n_ar_payment_bundle
+#: model:ir.actions.report,name:l10n_ar_payment_bundle.action_report_receipt_bundle
+msgid "Payment Receipt bundled"
+msgstr "Recibo de Pago agrupado"
 
 #. module: l10n_ar_payment_bundle
 #: model:ir.model,name:l10n_ar_payment_bundle.model_payment_rename_wizard
@@ -392,6 +407,7 @@ msgid "To Pay Lines"
 msgstr "Líneas a Pagar"
 
 #. module: l10n_ar_payment_bundle
+#: model_terms:ir.ui.view,arch_db:l10n_ar_payment_bundle.view_account_move_bundle_list
 #: model_terms:ir.ui.view,arch_db:l10n_ar_payment_bundle.view_account_payment_custom_list
 msgid "Total"
 msgstr "Total"
@@ -436,3 +452,9 @@ msgid ""
 msgstr ""
 "No puede resecuenciar movimientos vinculados a un pago múltiple. Por favor "
 "resecuencie el pago en su lugar."
+
+#. module: l10n_ar_payment_bundle
+#. odoo-python
+#: code:addons/l10n_ar_payment_bundle/models/account_payment.py:0
+msgid "id"
+msgstr ""

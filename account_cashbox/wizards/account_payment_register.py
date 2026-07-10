@@ -21,6 +21,10 @@ class AccountPaymentRegister(models.TransientModel):
         compute="_compute_requiere_account_cashbox_session",
         compute_sudo=False,
     )
+    available_cashbox_session_ids = fields.Many2many(
+        "account.cashbox.session",
+        compute="_compute_available_cashbox_session_ids",
+    )
 
     @api.depends_context("uid")
     # dummy depends para que se compute(no estamos seguros porque solo con el depends_context no computa)
@@ -28,11 +32,15 @@ class AccountPaymentRegister(models.TransientModel):
     def _compute_requiere_account_cashbox_session(self):
         self.requiere_account_cashbox_session = self.env.user.requiere_account_cashbox_session
 
+    @api.depends("company_id")
+    def _compute_available_cashbox_session_ids(self):
+        Session = self.env["account.cashbox.session"]
+        for rec in self:
+            rec.available_cashbox_session_ids = Session.search(Session._get_available_domain(rec.company_id))
+
     def _compute_cashbox_session_id(self):
         for rec in self:
-            session_ids = self.env["account.cashbox.session"].search(
-                [("state", "=", "opened"), "|", ("user_ids", "=", self.env.uid), ("user_ids", "=", False)]
-            )
+            session_ids = rec.available_cashbox_session_ids
             if len(session_ids) == 1:
                 rec.cashbox_session_id = session_ids.id
             else:
@@ -47,3 +55,9 @@ class AccountPaymentRegister(models.TransientModel):
             pay.available_journal_ids = pay.available_journal_ids._origin.filtered(
                 lambda x: x in pay.cashbox_session_id.line_ids.mapped("journal_id")
             )
+
+    def _create_payment_vals_from_wizard(self, batch_result):
+        payment_vals = super()._create_payment_vals_from_wizard(batch_result)
+        if self.cashbox_session_id:
+            payment_vals["cashbox_session_id"] = self.cashbox_session_id.id
+        return payment_vals
