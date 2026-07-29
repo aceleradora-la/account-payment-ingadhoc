@@ -85,8 +85,38 @@ class l10nLatamAccountPaymentCheck(models.Model):
         if payment_method_change or partner_id_change:
             super()._compute_issuer_vat()
 
+    @api.depends("outstanding_line_id.amount_residual")
     def _compute_issue_state(self):
-        super()._compute_issue_state()
+        """El estado de emisión se decide por método de pago, no por la presencia
+        de la línea de liquidez (tarea 70884).
+
+        Reemplaza la lógica de base en lugar de extenderla, y no es opcional: con
+        una línea de liquidez por cheque los cheques de **terceros** también
+        tienen ``outstanding_line_id``, así que la lógica de base les asignaría un
+        estado de emisión y entrarían al índice único de abajo, que se apoya en
+        ``issue_state``. Sacar esto rompería la numeración de cheques de terceros.
+
+        Efecto colateral conocido: un cheque propio en borrador —que todavía no
+        tiene línea de liquidez— queda como 'debited'. Se reproduce a propósito
+        para no cambiar el comportamiento al relocalizar el parche; lo pinean
+        ``test_draft_check_is_debited_and_blocks_cancel_today`` y
+        ``test_two_draft_payments_cannot_repeat_a_number_today``.
+        """
+        for rec in self:
+            if rec.payment_method_code != "own_checks":
+                rec.issue_state = False
+            elif rec.amount and not rec.outstanding_line_id.amount_residual:
+                if any(
+                    line.account_id.account_type in ["liability_payable", "asset_receivable"]
+                    for line in rec.outstanding_line_id.matched_debit_ids.debit_move_id.move_id.line_ids
+                ):
+                    rec.issue_state = "voided"
+                else:
+                    rec.issue_state = "debited"
+            else:
+                rec.issue_state = "handed"
+
+        # si la cuenta no es conciliable no queda nada por debitar
         for rec in self.filtered(lambda r: r.payment_method_code == "own_checks"):
             account = rec.outstanding_line_id.account_id
             if account and not account.reconcile:

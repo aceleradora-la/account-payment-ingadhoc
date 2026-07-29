@@ -1,6 +1,6 @@
 from datetime import timedelta
 
-from odoo import api, fields, models
+from odoo import Command, _, api, fields, models
 from odoo.exceptions import ValidationError
 
 
@@ -214,6 +214,78 @@ class AccountPayment(models.Model):
                     "All selected checks must belong to the source journal (%s)."
                     % rec.destination_journal_id.display_name
                 )
+
+    # ------------------------------------------------------------------
+    # Una línea de liquidez por cheque (tarea 70884)
+    #
+    # Reemplaza el "split move" que base posteaba después del pago: cada cheque
+    # tiene su propia línea dentro del asiento del pago, con su nominal, su
+    # vencimiento y su link al cheque. Los efectos colaterales que se reproducen
+    # a propósito los pinean los tests terminados en ``_today``.
+    # ------------------------------------------------------------------
+    def _prepare_move_liquidity_lines(self, default_vals):
+        if l10n_latam_checks := self.l10n_latam_new_check_ids | self.l10n_latam_move_check_ids:
+            liquidity_vals = []
+            payment_currency = self.currency_id
+            check_suffix = "".join([item[1] for item in self._get_aml_default_display_name_list()])
+            line_common_vals = {
+                "currency_id": self.currency_id.id,
+                "partner_id": self.partner_id.id,
+                "account_id": self.outstanding_account_id.id,
+            }
+            for check in l10n_latam_checks:
+                liquidity_amount = check.amount if self.payment_type == "inbound" else -check.amount
+                balance = payment_currency._convert(
+                    liquidity_amount,
+                    self.company_id.currency_id,
+                    self.company_id,
+                    check.payment_date,
+                )
+                liquidity_vals.append(
+                    {
+                        "name": _(
+                            "Check %(check_number)s - %(suffix)s",
+                            check_number=check.name,
+                            suffix=check_suffix,
+                        ),
+                        "date_maturity": check.payment_date,
+                        "amount_currency": liquidity_amount,
+                        "balance": balance,
+                        "l10n_latam_check_ids": [Command.set(check.ids)],
+                        **line_common_vals,
+                    }
+                )
+            return liquidity_vals
+        return super()._prepare_move_liquidity_lines(default_vals)
+
+    def _l10n_latam_check_split_move(self):
+        """No-op: las líneas de liquidez de arriba reemplazan al split move."""
+        return
+
+    def _l10n_latam_check_unlink_split_move(self):
+        """No-op: no hay split move que desarmar, las líneas de los cheques viven
+        en el asiento del pago, así que al volver a borrador los cheques quedan
+        linkeados igual."""
+        return
+
+    def _synchronize_to_moves(self, changed_fields):
+        """Base bloquea escribir ``amount`` cuando el asiento tiene más de una
+        línea de liquidez. Los pagos con cheques legítimamente tienen una por
+        cheque, así que a esos les sacamos ``amount`` del set de disparadores y
+        dejamos que base haga el mapeo.
+
+        No copiamos el loop de mapeo de base a propósito: así seguimos heredando
+        los cambios de upstream (que es el motivo de haber traído este código a
+        nuestros módulos). Diferencia conocida con el core parcheado: si
+        ``amount`` es el único campo escrito, acá no se re-sincroniza nada. Es
+        inocuo porque ``amount`` se recalcula desde los cheques.
+        """
+        with_checks = self.filtered(lambda x: x.l10n_latam_new_check_ids or x.l10n_latam_move_check_ids)
+        super(AccountPayment, self - with_checks)._synchronize_to_moves(changed_fields)
+        if with_checks:
+            super(AccountPayment, with_checks)._synchronize_to_moves(
+                tuple(field for field in changed_fields if field != "amount")
+            )
 
     def _prepare_paired_payment_values(self):
         """Override to validate check payment method combinations on internal transfers.

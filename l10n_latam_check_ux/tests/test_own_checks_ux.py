@@ -5,13 +5,12 @@
 """Own checks: journal entry shape, lifecycle and border cases.
 
 Part of the harness of task 70884: it pins the behaviour of the core check patch
-the ADHOC image carries, so relocating that patch into our modules can be proven
-equivalent.
+the ADHOC image carries, now relocated into our modules.
 
 Tests whose name ends in ``_today`` pin a side effect of the patch on purpose -
-they are not the desired behaviour, and the task documents each one. They are
-kept commented out: they belong to the relocation PR, which is where each of
-them either flips or is deleted.
+they are not the desired behaviour, and the task documents each one. They assert
+the relocation is equivalent; fixing any of them is a separate PR, which is where
+the assertion flips.
 """
 
 from odoo import Command, fields
@@ -86,60 +85,60 @@ class TestOwnChecksMulticurrency(LatamCheckCommon):
         expected_total = self.foreign_currency._convert(120, self.company_currency, self.company, payment.date)
         self.assertEqual(abs(sum(lines.mapped("balance"))), expected_total)
 
-    # def test_deferred_checks_fx_entry_is_unbalanced_today(self):
-    #     """EQUIVALENCE (task 70884, BUG-2: deferred FX).
-    #
-    #     Pins what the patched core does today, which the relocation must
-    #     reproduce: each check is converted at ``check.payment_date`` while the
-    #     counterpart keeps the conversion at ``payment.date``, so a deferred check
-    #     with a moving rate makes the entry unbalanced and posting is rejected.
-    #
-    #     It is a known defect (fixing it means converting at the payment date),
-    #     but fixing it is a separate PR: this assertion flips there, not here.
-    #     """
-    #     payment = self._create_own_check_payment(
-    #         [20, 30, 70],
-    #         numbers=["00001201", "00001202", "00001203"],
-    #         currency=self.foreign_currency,
-    #         check_dates=[fields.Date.add(self.today, days=40)] * 3,
-    #     )
-    #     with self.assertRaisesRegex(UserError, "not balanced"):
-    #         payment.action_post()
+    def test_deferred_checks_fx_entry_is_unbalanced_today(self):
+        """EQUIVALENCE (task 70884, BUG-2: deferred FX).
+
+        Pins what the patched core does today, which the relocation reproduces:
+        each check is converted at ``check.payment_date`` while the counterpart
+        keeps the conversion at ``payment.date``, so a deferred check with a
+        moving rate makes the entry unbalanced and posting is rejected.
+
+        It is a known defect (fixing it means converting at the payment date),
+        but fixing it is a separate PR: this assertion flips there, not here.
+        """
+        payment = self._create_own_check_payment(
+            [20, 30, 70],
+            numbers=["00001201", "00001202", "00001203"],
+            currency=self.foreign_currency,
+            check_dates=[fields.Date.add(self.today, days=40)] * 3,
+        )
+        with self.assertRaisesRegex(UserError, "not balanced"):
+            payment.action_post()
 
 
 @tagged("post_install", "-at_install")
 class TestOwnChecksLifecycle(LatamCheckCommon):
     """Draft / post / cancel / reset-to-draft and issue_state transitions."""
 
-    # def test_draft_check_is_debited_and_blocks_cancel_today(self):
-    #     """EQUIVALENCE (task 70884, BUG-1: draft issue_state).
-    #
-    #     Pins what the patched core does today, which the relocation must
-    #     reproduce: ``_compute_issue_state`` decides by ``payment_method_code``
-    #     instead of by ``outstanding_line_id``, so a draft own check -one that was
-    #     never handed out- comes out as 'debited'; and as a consequence the draft
-    #     payment cannot be cancelled.
-    #
-    #     It is a known defect; fixing it is a separate PR.
-    #     """
-    #     payment = self._create_own_check_payment([100], numbers=["00002101"])
-    #
-    #     self.assertEqual(payment.l10n_latam_new_check_ids.issue_state, "debited")
-    #     with self.assertRaises(UserError):
-    #         payment.action_cancel()
+    def test_draft_check_is_debited_and_blocks_cancel_today(self):
+        """EQUIVALENCE (task 70884, BUG-1: draft issue_state).
 
-    # @mute_logger("odoo.sql_db")
-    # def test_two_draft_payments_cannot_repeat_a_number_today(self):
-    #     """EQUIVALENCE (task 70884, BUG-1: draft issue_state).
-    #
-    #     Same root cause, pinned so the relocation reproduces it: the ux unique
-    #     index covers checks with an issue_state, and since drafts now get one,
-    #     two *draft* payments sharing a number already hit the database
-    #     constraint, which should only happen for handed checks. Separate PR.
-    #     """
-    #     self._create_own_check_payment([100], numbers=["00002301"])
-    #     with self.assertRaises(IntegrityError), self.cr.savepoint():
-    #         self._create_own_check_payment([100], numbers=["00002301"])
+        Pins what the patched core does today, which the relocation reproduces:
+        ``_compute_issue_state`` decides by ``payment_method_code`` instead of by
+        ``outstanding_line_id``, so a draft own check -one that was never handed
+        out- comes out as 'debited'; and as a consequence the draft payment
+        cannot be cancelled.
+
+        It is a known defect; fixing it is a separate PR.
+        """
+        payment = self._create_own_check_payment([100], numbers=["00002101"])
+
+        self.assertEqual(payment.l10n_latam_new_check_ids.issue_state, "debited")
+        with self.assertRaises(UserError):
+            payment.action_cancel()
+
+    @mute_logger("odoo.sql_db")
+    def test_two_draft_payments_cannot_repeat_a_number_today(self):
+        """EQUIVALENCE (task 70884, BUG-1: draft issue_state).
+
+        Same root cause, pinned because the relocation reproduces it: the ux
+        unique index covers checks with an issue_state, and since drafts now get
+        one, two *draft* payments sharing a number already hit the database
+        constraint, which should only happen for handed checks. Separate PR.
+        """
+        self._create_own_check_payment([100], numbers=["00002301"])
+        with self.assertRaises(IntegrityError), self.cr.savepoint():
+            self._create_own_check_payment([100], numbers=["00002301"])
 
     @mute_logger("odoo.sql_db")
     def test_check_number_is_unique_per_payment_method_line(self):
