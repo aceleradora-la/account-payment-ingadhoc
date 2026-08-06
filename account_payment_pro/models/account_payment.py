@@ -22,6 +22,7 @@ class AccountPayment(models.Model):
         compute="_compute_counterpart_currency_id",
         store=True,
         readonly=False,
+        copy=False,
     )
     destination_currency_id = fields.Many2one(
         "res.currency",
@@ -140,6 +141,13 @@ class AccountPayment(models.Model):
         readonly=False,
         check_company=True,
     )
+    skip_to_pay_autofill = fields.Boolean(
+        default=False,
+        copy=False,
+        help="Payments created only to register a movement (e.g. third-party check rejection) that "
+        "must not reconcile existing debt. When set, to_pay_move_line_ids is left empty instead of "
+        "auto-filled with the partner's open lines.",
+    )
     matched_move_line_ids = fields.Many2many(
         "account.move.line",
         compute="_compute_matched_move_line_ids",
@@ -171,6 +179,20 @@ class AccountPayment(models.Model):
     open_move_line_ids = fields.One2many(related="move_id.open_move_line_ids")
     multi_currency_debt = fields.Boolean(
         compute="_compute_multi_currency_debt",
+    )
+    partner_multi_currency_debt = fields.Boolean(
+        compute="_compute_partner_multi_currency_debt",
+        help="True cuando el contacto tiene deuda abierta en más de una moneda. "
+        "A diferencia de multi_currency_debt (que mira las líneas ya seleccionadas, "
+        "que el default filtra a una sola moneda), este mira la deuda TOTAL del partner.",
+    )
+    multi_currency_warning_dismissed = fields.Boolean(
+        compute="_compute_multi_currency_warning_dismissed",
+        store=True,
+        readonly=False,
+        copy=False,
+        help="El usuario descartó el aviso de deuda multi-moneda con la cruz. "
+        "Se resetea solo si cambia el contacto o la compañía.",
     )
 
     @api.model
@@ -207,6 +229,32 @@ class AccountPayment(models.Model):
                 continue
             currencies = rec.to_pay_move_line_ids.mapped("currency_id")
             rec.multi_currency_debt = len(currencies) > 1
+
+    @api.depends("partner_id", "company_id", "partner_type", "company_id.reconcile_on_company_currency")
+    def _compute_partner_multi_currency_debt(self):
+        for rec in self:
+            if rec.company_id.reconcile_on_company_currency or not rec.partner_id:
+                rec.partner_multi_currency_debt = False
+                continue
+            # Miramos la deuda total abierta del contacto (no las líneas ya filtradas
+            # por el default de moneda). Reutilizamos el dominio canónico sin el filtro
+            # por moneda (force_currency_domain no está en este contexto).
+            currencies = self.env["account.move.line"].search(rec._get_to_pay_move_lines_domain()).mapped("currency_id")
+            rec.partner_multi_currency_debt = len(currencies) > 1
+
+    @api.depends("partner_id", "company_id")
+    def _compute_multi_currency_warning_dismissed(self):
+        # Reseteamos el descarte cuando cambia el contacto o la compañía: la deuda
+        # cambió de contexto y el aviso vuelve a ser relevante. El campo es
+        # readonly=False, así que action_dismiss_multi_currency_warning lo puede pisar
+        # a True y ese valor persiste hasta el próximo cambio de partner/compañía.
+        for rec in self:
+            rec.multi_currency_warning_dismissed = False
+
+    def action_dismiss_multi_currency_warning(self):
+        """Cruz del aviso de deuda multi-moneda: lo descarta para este pago.
+        Solo tiene sentido en borrador, que es donde se ve el aviso y se elige la deuda."""
+        self.filtered(lambda p: p.state == "draft").multi_currency_warning_dismissed = True
 
     @api.depends(
         "destination_account_id",
@@ -263,8 +311,14 @@ class AccountPayment(models.Model):
                 if len(currencies) == 1:
                     rec.counterpart_currency_id = currencies
                 else:
-                    # Múltiples monedas: ask user to edit
-                    rec.counterpart_currency_id = False
+                    # Múltiples monedas: default a moneda de compañía y descartar
+                    # las líneas ya seleccionadas que no son de esa moneda.
+                    # Filtramos en memoria (no _add_all) para no re-buscar en DB
+                    # dentro de un compute que depende de to_pay_move_line_ids.
+                    rec.counterpart_currency_id = company_currency
+                    rec.to_pay_move_line_ids = rec.to_pay_move_line_ids.filtered(
+                        lambda line: line.currency_id == company_currency
+                    )
             elif not rec.counterpart_currency_id:
                 # Sin deuda seleccionada: default moneda de la compañía
                 rec.counterpart_currency_id = company_currency
@@ -486,6 +540,21 @@ class AccountPayment(models.Model):
             if "amount" in vals and "amount_exact" not in vals:
                 vals["amount_exact"] = vals["amount"]
         return super().create(vals_list)
+
+    def copy(self, default=None):
+        # On copy, to_pay_move_line_ids (copy=False) is recomputed via _add_all,
+        # which pulls all the partner's open debt without filtering by currency. If
+        # the partner has debt in several currencies, that triggers
+        # _check_to_pay_lines_currency. We propagate the counterpart currency chosen
+        # on the source record as a filter, just like action_add_all, so the copy
+        # ends up with a single currency.
+        new_records = self.browse()
+        for rec in self:
+            ctx = {}
+            if rec.counterpart_currency_id and not rec.company_id.reconcile_on_company_currency:
+                ctx["force_currency_domain"] = rec.counterpart_currency_id.id
+            new_records += super(AccountPayment, rec.with_context(**ctx)).copy(default)
+        return new_records
 
     def write(self, vals):
         if "amount" in vals and "amount_exact" not in vals:
@@ -819,10 +888,14 @@ class AccountPayment(models.Model):
         conciliacion de deuda de un asiento normal no lo muestra)
         """
         stored_payments = self.filtered("id")
+        # _get_valid_payment_account_types() does not depend on the filtered
+        # line, so we compute it once instead of on every line. Otherwise it
+        # triggers an N+1: account_balance_import overrides it to call
+        # company.get_unaffected_earnings_account(), which runs an uncached
+        # search on account.account once per evaluated line.
+        valid_payment_account_types = self._get_valid_payment_account_types()
         for rec in stored_payments:
-            payment_lines = rec.move_id.line_ids.filtered(
-                lambda x: x.account_type in self._get_valid_payment_account_types()
-            )
+            payment_lines = rec.move_id.line_ids.filtered(lambda x: x.account_type in valid_payment_account_types)
             debit_moves = payment_lines.mapped("matched_debit_ids.debit_move_id")
             credit_moves = payment_lines.mapped("matched_credit_ids.credit_move_id")
 
@@ -1053,7 +1126,7 @@ class AccountPayment(models.Model):
             self.remove_all()
 
     # We dont set 'is_internal_transfer' as a dependencies as it could leed to recompute to_pay_move_line_ids
-    @api.depends("partner_id", "partner_type", "company_id")
+    @api.depends("partner_id", "partner_type", "company_id", "skip_to_pay_autofill")
     def _compute_to_pay_move_lines(self):
         # TODO ?
         # # if payment group is being created from a payment we dont want to compute to_pay_move_lines
@@ -1062,6 +1135,14 @@ class AccountPayment(models.Model):
         # Se recomputan las lienas solo si la deuda que esta seleccionada solo si
         # cambio el partner, compania o partner_type
         records = self.filtered(lambda x: x.state == "draft")
+        # Hay pagos que solo registran un movimiento (ej. rechazo de cheques de terceros) y no
+        # concilian deuda existente. En esos casos el autollenado de la deuda del partner no
+        # corresponde y ademas, con conciliacion en moneda original y deuda multimoneda,
+        # romperia _check_to_pay_lines_currency. La intencion se persiste en skip_to_pay_autofill
+        # (esta en @api.depends) para que el valor almacenado no dependa del contexto.
+        skip = records.filtered("skip_to_pay_autofill")
+        skip.remove_all()
+        records -= skip
         internal_transfers = records.filtered(lambda x: x.is_internal_transfer)
 
         with_payment_pro = self._get_filter_payments(records, ["direct_debit_mandate_id", "pos_session_id"])
