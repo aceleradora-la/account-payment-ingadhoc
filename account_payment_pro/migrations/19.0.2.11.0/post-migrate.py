@@ -18,7 +18,8 @@ forzando el recompute (misma logica que ya usa
 
 import logging
 
-from odoo.upgrade import util
+from odoo import SUPERUSER_ID
+from odoo.api import Environment
 
 _logger = logging.getLogger(__name__)
 
@@ -40,7 +41,7 @@ def migrate(cr, version):
 
     _logger.info("account_payment_pro: running post-migrate for %s", version)
 
-    env = util.env(cr)
+    env = Environment(cr, SUPERUSER_ID, {})
     payments = env["account.payment"].search(
         [
             ("outstanding_account_id", "=", False),
